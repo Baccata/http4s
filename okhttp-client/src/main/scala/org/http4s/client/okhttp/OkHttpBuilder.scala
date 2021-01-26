@@ -88,8 +88,12 @@ sealed abstract class OkHttpBuilder[F[_]] private (
     Resource.make(F.delay(create))(_ => F.unit)
 
   private def run(req: Request[F]) =
-    Resource.suspend(F.async_[Resource[F, Response[F]]] { cb =>
-      okHttpClient.newCall(toOkHttpRequest(req)).enqueue(handler(cb))
+    Resource.suspend(F.async[Resource[F, Response[F]]] { cb =>
+      F.delay {
+        val call = okHttpClient.newCall(toOkHttpRequest(req))
+        call.enqueue(handler(cb))
+        Some(F.delay(call.cancel()))
+      }
     })
 
   private def handler(cb: Result[F] => Unit)(implicit F: Async[F]): Callback =
