@@ -17,6 +17,7 @@
 package org.http4s.ember.server
 
 import _root_.org.typelevel.log4cats.Logger
+import _root_.org.typelevel.log4cats.SelfAwareLogger
 import cats._
 import cats.effect._
 import cats.effect.syntax.all._
@@ -37,6 +38,7 @@ import org.http4s.server.Server
 import org.http4s.server.websocket.WebSocketBuilder2
 
 import scala.concurrent.duration._
+import logger.LoggerKernel
 
 final class EmberServerBuilder[F[_]: Async: Network] private (
     val host: Option[Host],
@@ -54,11 +56,12 @@ final class EmberServerBuilder[F[_]: Async: Network] private (
     val idleTimeout: Duration,
     val shutdownTimeout: Duration,
     val additionalSocketOptions: List[SocketOption],
-    private val logger: Logger[F],
+    private val logger: LoggerKernel[F],
     private val unixSocketConfig: Option[(UnixSockets[F], UnixSocketAddress, Boolean, Boolean)],
     private val enableHttp2: Boolean,
     private val requestLineParseErrorHandler: Throwable => F[Response[F]],
     private val maxHeaderSizeErrorHandler: EmberException.MessageTooLong => F[Response[F]],
+    private val traceEnabled: Option[F[Boolean]],
 ) { self =>
 
   @deprecated("Use org.http4s.ember.server.EmberServerBuilder.maxConnections", "0.22.3")
@@ -80,13 +83,14 @@ final class EmberServerBuilder[F[_]: Async: Network] private (
       idleTimeout: Duration = self.idleTimeout,
       shutdownTimeout: Duration = self.shutdownTimeout,
       additionalSocketOptions: List[SocketOption] = self.additionalSocketOptions,
-      logger: Logger[F] = self.logger,
+      logger: LoggerKernel[F] = self.logger,
       unixSocketConfig: Option[(UnixSockets[F], UnixSocketAddress, Boolean, Boolean)] =
         self.unixSocketConfig,
       enableHttp2: Boolean = self.enableHttp2,
       requestLineParseErrorHandler: Throwable => F[Response[F]] = self.requestLineParseErrorHandler,
       maxHeaderSizeErrorHandler: EmberException.MessageTooLong => F[Response[F]] =
         self.maxHeaderSizeErrorHandler,
+      traceEnabled: Option[F[Boolean]] = traceEnabled,
   ): EmberServerBuilder[F] =
     new EmberServerBuilder[F](
       host = host,
@@ -109,6 +113,7 @@ final class EmberServerBuilder[F[_]: Async: Network] private (
       enableHttp2 = enableHttp2,
       requestLineParseErrorHandler = requestLineParseErrorHandler,
       maxHeaderSizeErrorHandler = maxHeaderSizeErrorHandler,
+      traceEnabled = traceEnabled,
     )
 
   def withHostOption(host: Option[Host]): EmberServerBuilder[F] = copy(host = host)
@@ -191,7 +196,25 @@ final class EmberServerBuilder[F[_]: Async: Network] private (
       requestHeaderReceiveTimeout: Duration
   ): EmberServerBuilder[F] =
     copy(requestHeaderReceiveTimeout = requestHeaderReceiveTimeout)
-  def withLogger(l: Logger[F]): EmberServerBuilder[F] = copy(logger = l)
+
+  def withLogger(l: LoggerKernel[F]): EmberServerBuilder[F] =
+    copy(logger = l)
+
+  def withTraceEnabled(computeTraceEnabled: F[Boolean]): EmberServerBuilder[F] =
+    copy(traceEnabled = Some(computeTraceEnabled))
+  def withoutTraceEnabled: EmberServerBuilder[F] =
+    copy(traceEnabled = None)
+
+  def withLogger(l: Logger[F]): EmberServerBuilder[F] = {
+    val maybeTraceEnabled = l match {
+      case sl: SelfAwareLogger[F] => Some(sl.isTraceEnabled)
+      case _ => None
+    }
+    copy(
+      logger = _root_.logger.interoplog4cats.log4catsBackend(l),
+      traceEnabled = maybeTraceEnabled,
+    )
+  }
 
   def withHttp2: EmberServerBuilder[F] = copy(enableHttp2 = true)
   def withoutHttp2: EmberServerBuilder[F] = copy(enableHttp2 = false)
@@ -260,6 +283,7 @@ final class EmberServerBuilder[F[_]: Async: Network] private (
               enableHttp2,
               requestLineParseErrorHandler,
               maxHeaderSizeErrorHandler,
+              traceEnabled,
             )
             .compile
             .drain
@@ -288,6 +312,7 @@ final class EmberServerBuilder[F[_]: Async: Network] private (
             enableHttp2,
             requestLineParseErrorHandler,
             maxHeaderSizeErrorHandler,
+            traceEnabled,
           )
           .compile
           .drain
@@ -295,7 +320,13 @@ final class EmberServerBuilder[F[_]: Async: Network] private (
       }
       _ <- Resource.onFinalize(shutdown.await)
       bindAddress <- Resource.eval(ready.get.rethrow)
-      _ <- Resource.eval(logger.info(s"Ember-Server service bound to address: ${bindAddress}"))
+      _ <- Resource.eval(
+        logger.logInfo(
+          _.withMessage(s"Ember-Server service bound").withContext("http.address")(
+            bindAddress.toString
+          )
+        )
+      )
     } yield new Ip4sServer {
       def ip4sAddress: SocketAddress[IpAddress] = bindAddress
       def isSecure: Boolean = tlsInfoOpt.isDefined
@@ -320,11 +351,12 @@ object EmberServerBuilder extends EmberServerBuilderCompanionPlatform {
       idleTimeout = Defaults.idleTimeout,
       shutdownTimeout = Defaults.shutdownTimeout,
       additionalSocketOptions = Defaults.additionalSocketOptions,
-      logger = defaultLogger[F],
+      logger = _root_.logger.interoplog4cats.log4catsBackend(defaultLogger[F]),
       unixSocketConfig = None,
       enableHttp2 = false,
       requestLineParseErrorHandler = Defaults.requestLineParseErrorHandler,
       maxHeaderSizeErrorHandler = Defaults.maxHeaderSizeErrorHandler,
+      traceEnabled = None,
     )
 
   @deprecated("Use the overload which accepts a Network", "0.23.16")

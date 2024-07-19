@@ -37,6 +37,7 @@ import org.http4s.ember.core.h2.H2Frame.Settings.ConnectionSettings.default
 import org.http4s.headers.`User-Agent`
 import org.typelevel.keypool._
 import org.typelevel.log4cats.Logger
+import logger.LoggerKernel
 
 import scala.concurrent.duration.Duration
 import scala.concurrent.duration._
@@ -47,7 +48,7 @@ final class EmberClientBuilder[F[_]: Async: Network] private (
     val maxTotal: Int,
     val maxPerKey: RequestKey => Int,
     val idleTimeInPool: Duration,
-    private val logger: Logger[F],
+    private val logger: LoggerKernel[F],
     val chunkSize: Int,
     val maxResponseHeaderSize: Int,
     private val idleConnectionTime: Duration,
@@ -70,7 +71,7 @@ final class EmberClientBuilder[F[_]: Async: Network] private (
       maxTotal: Int = self.maxTotal,
       maxPerKey: RequestKey => Int = self.maxPerKey,
       idleTimeInPool: Duration = self.idleTimeInPool,
-      logger: Logger[F] = self.logger,
+      logger: LoggerKernel[F] = self.logger,
       chunkSize: Int = self.chunkSize,
       maxResponseHeaderSize: Int = self.maxResponseHeaderSize,
       idleConnectionTime: Duration = self.idleConnectionTime,
@@ -139,7 +140,9 @@ final class EmberClientBuilder[F[_]: Async: Network] private (
     copy(idleConnectionTime = idleConnectionTime)
 
   /** Sets the `Logger`. */
-  def withLogger(logger: Logger[F]): EmberClientBuilder[F] = copy(logger = logger)
+  def withLogger(logger: LoggerKernel[F]): EmberClientBuilder[F] = copy(logger = logger)
+  def withLogger(logger: Logger[F]): EmberClientBuilder[F] =
+    copy(logger = _root_.logger.interoplog4cats.log4catsBackend(logger))
 
   /** Sets the max `chunkSize` in bytes to read from sockets at a time. */
   def withChunkSize(chunkSize: Int): EmberClientBuilder[F] = copy(chunkSize = chunkSize)
@@ -239,10 +242,12 @@ final class EmberClientBuilder[F[_]: Async: Network] private (
 
   private val verifyTimeoutRelations: F[Unit] =
     logger
-      .warn(
-        s"timeout ($timeout) is >= idleConnectionTime ($idleConnectionTime). " +
-          s"It is recommended to configure timeout < idleConnectionTime, " +
-          s"or disable one of them explicitly by setting it to Duration.Inf."
+      .logWarn(
+        _.withMessage {
+          s"timeout ($timeout) is >= idleConnectionTime ($idleConnectionTime). " +
+            s"It is recommended to configure timeout < idleConnectionTime, " +
+            s"or disable one of them explicitly by setting it to Duration.Inf."
+        }
       )
       .whenA(timeout.isFinite && timeout >= idleConnectionTime)
 
@@ -270,10 +275,14 @@ final class EmberClientBuilder[F[_]: Async: Network] private (
                 ),
               chunkSize,
             ) <* Resource
-              .eval(logger.trace(s"Created Connection - RequestKey: ${requestKey}"))
+              .eval(
+                logger.logTrace(
+                  _.withMessage(s"Created Connection - RequestKey: ${requestKey}")
+                )
+              )
               .onFinalize(
-                logger.trace(
-                  s"Shutting Down Connection - RequestKey: ${requestKey}"
+                logger.logTrace(
+                  _.withMessage(s"Shutting Down Connection - RequestKey: ${requestKey}")
                 )
               )
           )
@@ -302,9 +311,14 @@ final class EmberClientBuilder[F[_]: Async: Network] private (
           managed <- ClientHelpers.getValidManaged(pool, request)
           _ <- Resource.eval(
             pool.state.flatMap { poolState =>
-              logger.trace(
-                s"Connection Taken - Key: ${managed.value.keySocket.requestKey} - Reused: ${managed.isReused} - PoolState: $poolState"
+              logger.logTrace(
+                // todo proper json encoding for pool state
+                _.withMessage("ConnectionTaken")
+                  .withContext("http.connection.key")(managed.value.keySocket.requestKey.toString())
+                  .withContext("http.connection.reused")(managed.isReused)
+                  .withContext("http.connection.poolstate")(poolState.toString)
               )
+              // PoolState: $poolState"
             }
           )
           responseResource <- Resource.makeCaseFull((poll: Poll[F]) =>

@@ -31,7 +31,7 @@ import org.http4s.Uri.Scheme
 import org.http4s._
 import org.http4s.ember.core.Util
 import org.http4s.h2.H2Keys.Http2PriorKnowledge
-import org.typelevel.log4cats.Logger
+import _root_.logger.LoggerKernel
 import scodec.bits._
 
 import scala.concurrent.duration._
@@ -81,7 +81,7 @@ private[ember] class H2Client[F[_]](
         org.http4s.Request[fs2.Pure],
         F[org.http4s.Response[F]],
     ) => F[Outcome[F, Throwable, Unit]],
-    logger: Logger[F],
+    logger: LoggerKernel[F],
 )(implicit F: Async[F]) {
   import org.http4s._
   import H2Client._
@@ -253,7 +253,11 @@ private[ember] class H2Client[F[_]](
           _ <- h2.mapRef.update(_ - i)
           out <- outE.liftTo[F]
         } yield out)
-          .onError { case e => logger.warn(e)(s"Error Handling Push Promise") }
+          .onError { case e =>
+            logger.logWarn(
+              _.withThrowable(e).withMessage(s"Error Handling Push Promise")
+            )
+          }
           .attempt
           .void
 
@@ -262,7 +266,9 @@ private[ember] class H2Client[F[_]](
         .parEvalMap(10)(i => if (i % 2 == 0) processStream(i) else F.unit)
         .compile
         .drain
-        .onError { case e => logger.info(e)(s"Server Connection Processing Halted") } // Idle etc.
+        .onError { case e =>
+          logger.logInfo(_.withThrowable(e).withMessage(s"Error Handling Push Promise"))
+        } // Idle etc.
     }
 
     def processSettings(h2: H2Connection[F]): F[Unit] = {
@@ -330,7 +336,7 @@ private[ember] object H2Client {
       ) => F[Outcome[F, Throwable, Unit]],
       tlsContext: TLSContext[F],
       unixSockets: Option[UnixSockets[F]],
-      logger: Logger[F],
+      logger: LoggerKernel[F],
       settings: H2Frame.Settings.ConnectionSettings = defaultSettings,
       enableEndpointValidation: Boolean,
       enableServerNameIndication: Boolean,

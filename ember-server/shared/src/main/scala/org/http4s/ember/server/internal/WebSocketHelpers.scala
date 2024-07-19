@@ -44,13 +44,13 @@ import org.http4s.websocket.WebSocketContext
 import org.http4s.websocket.WebSocketFrame
 import org.http4s.websocket.WebSocketSeparatePipe
 import org.typelevel.ci._
-import org.typelevel.log4cats.Logger
 import scodec.bits.ByteVector
 
 import java.io.IOException
 import java.nio.ByteBuffer
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration.Duration
+import logger.LoggerKernel
 
 private[internal] object WebSocketHelpers {
 
@@ -71,7 +71,7 @@ private[internal] object WebSocketHelpers {
       idleTimeout: Duration,
       onWriteFailure: (Option[Request[F]], Response[F], Throwable) => F[Unit],
       errorHandler: Throwable => F[Response[F]],
-      logger: Logger[F],
+      logger: LoggerKernel[F],
   )(implicit F: Temporal[F]): F[Unit] = {
     val wsResponse = clientHandshake(req) match {
       case Right(key) =>
@@ -99,10 +99,17 @@ private[internal] object WebSocketHelpers {
 
     handler.handleErrorWith {
       case e @ BrokenPipeError() =>
-        logger.trace(e)("WebSocket connection abruptly terminated by client")
+        logger.logTrace(
+          _.withThrowable(e).withMessage("WebSocket connection abruptly terminated by client")
+        )
       case e @ EndOfStreamError() =>
-        logger.trace(e)("WebSocket connection abruptly terminated by client")
-      case e => logger.error(e)("WebSocket connection terminated with exception")
+        logger.logTrace(
+          _.withThrowable(e).withMessage("WebSocket connection abruptly terminated by client")
+        )
+      case e =>
+        logger.logTrace(
+          _.withThrowable(e).withMessage("WebSocket connection terminated with exception")
+        )
     }
   }
 

@@ -18,8 +18,8 @@ package org.http4s.ember.client
 
 import cats.effect.Async
 import fs2.io.net.unixsocket.UnixSockets
-import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
+import logger.LoggerKernel
 
 private[client] trait EmberClientBuilderPlatform {
 
@@ -30,6 +30,7 @@ private[client] trait EmberClientBuilderPlatform {
 
 private[client] trait EmberClientBuilderCompanionPlatform {
 
-  private[client] def defaultLogger[F[_]: Async]: Logger[F] = Slf4jLogger.getLogger[F]
+  private[client] def defaultLogger[F[_]: Async]: LoggerKernel[F] =
+    logger.interoplog4cats.log4catsBackend(Slf4jLogger.getLogger[F])
 
 }
