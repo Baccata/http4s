@@ -25,7 +25,7 @@ import fs2.concurrent.Channel
 import org.http4s.Header
 import org.http4s.Headers
 import org.http4s.Message
-import org.typelevel.log4cats.Logger
+import logger.LoggerKernel
 import scodec.bits._
 
 import java.util.concurrent.CancellationException
@@ -44,7 +44,7 @@ private[h2] class H2Stream[F[_]: Concurrent](
     val enqueue: cats.effect.std.Queue[F, Chunk[H2Frame]],
     val onClosed: F[Unit],
     val goAway: H2Error => F[Unit],
-    private[this] val logger: Logger[F],
+    private[this] val logger: LoggerKernel[F],
 ) {
   import H2Stream.StreamState
 
@@ -205,7 +205,9 @@ private[h2] class H2Stream[F[_]: Concurrent](
           }
           for {
             h <- hpack.decodeHeaders(block).onError { case e =>
-              logger.error(e)(s"Issue in headers") >> goAway(H2Error.CompressionError)
+              logger.logError(
+                _.withThrowable(e).withMessage("Issue in headers")
+              ) >> goAway(H2Error.CompressionError)
             }
             newstate =
               if (headers.endStream) s.state match {
@@ -236,7 +238,7 @@ private[h2] class H2Stream[F[_]: Concurrent](
                           (if (newstate == StreamState.Closed) onClosed
                            else Applicative[F].unit)
                       case None =>
-                        logger.error("Headers Unable to be parsed") >>
+                        logger.logError(_.withMessage("Headers Unable to be parsed")) >>
                           rstStream(H2Error.ProtocolError)
                     }
                   case _ => s.trailWith(h.toList).void
@@ -253,7 +255,7 @@ private[h2] class H2Stream[F[_]: Concurrent](
                           (if (newstate == StreamState.Closed) onClosed
                            else Applicative[F].unit)
                       case None =>
-                        logger.error("Headers Unable to be parsed") >>
+                        logger.logError(_.withMessage("Headers Unable to be parsed")) >>
                           rstStream(H2Error.ProtocolError)
                     }
                   case _ => s.trailWith(h.toList).void
@@ -281,7 +283,9 @@ private[h2] class H2Stream[F[_]: Concurrent](
             }
             for {
               h <- hpack.decodeHeaders(block).onError { case e =>
-                logger.error(e)("Issue in headers"); goAway(H2Error.CompressionError)
+                logger.logError(
+                  _.withThrowable(e).withMessage("Issue in headers")
+                ) >> goAway(H2Error.CompressionError)
               }
               _ <- state.update(s => s.copy(state = StreamState.ReservedRemote))
               _ <- PseudoHeaders.headersToRequestNoBody(h) match {

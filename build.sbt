@@ -6,6 +6,7 @@ import scala.xml.transform.{RewriteRule, RuleTransformer}
 
 // Global settings
 ThisBuild / crossScalaVersions := Seq(scala_3, scala_212, scala_213)
+ThisBuild / scalaVersion := scala_213
 ThisBuild / tlBspCrossProjectPlatforms := Set(JVMPlatform)
 ThisBuild / tlBaseVersion := "0.23"
 ThisBuild / developers += tlGitHubDev("rossabaker", "Ross A. Baker")
@@ -470,6 +471,7 @@ lazy val emberCore = libraryCrossProject("ember-core", CrossType.Full)
     startYear := Some(2019),
     unusedCompileDependenciesFilter -= moduleFilter("io.chrisdavenport", "log4cats-core"),
     libraryDependencies ++= Seq(
+      "io.github.baccata" %% "logger-kernel" % "0.1.0-SNAPSHOT",
       log4catsCore.value,
       log4catsTesting.value % Test,
       log4catsNoop.value % Test,
@@ -606,6 +608,9 @@ lazy val emberServer = libraryCrossProject("ember-server")
   .settings(
     description := "ember implementation for http4s servers",
     startYear := Some(2019),
+    libraryDependencies ++= Seq(
+      "io.github.baccata" %% "logger-log4cats" % "0.1.0-SNAPSHOT"
+    ),
     mimaBinaryIssueFilters ++= Seq(
       ProblemFilters.exclude[DirectMissingMethodProblem](
         "org.http4s.ember.server.EmberServerBuilder#Defaults.maxConcurrency"
@@ -656,7 +661,8 @@ lazy val emberClient = libraryCrossProject("ember-client")
     description := "ember implementation for http4s clients",
     startYear := Some(2019),
     libraryDependencies ++= Seq(
-      keypool.value
+      keypool.value,
+      "io.github.baccata" %% "logger-log4cats" % "0.1.0-SNAPSHOT",
     ),
     mimaBinaryIssueFilters := Seq(
       ProblemFilters

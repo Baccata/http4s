@@ -41,8 +41,7 @@ import org.http4s.headers.Connection
 import org.http4s.headers.Date
 import org.http4s.server.ServerRequestKeys
 import org.http4s.websocket.WebSocketContext
-import org.typelevel.log4cats.Logger
-import org.typelevel.log4cats.SelfAwareLogger
+import logger.LoggerKernel
 import org.typelevel.vault.Key
 import org.typelevel.vault.Vault
 import scodec.bits.ByteVector
@@ -73,11 +72,12 @@ private[server] object ServerHelpers extends ServerHelpersPlatform {
       maxHeaderSize: Int,
       requestHeaderReceiveTimeout: Duration,
       idleTimeout: Duration,
-      logger: Logger[F],
+      logger: LoggerKernel[F],
       webSocketKey: Key[WebSocketContext[F]],
       enableHttp2: Boolean,
       requestLineParseErrorHandler: Throwable => F[Response[F]],
       maxHeaderSizeErrorHandler: EmberException.MessageTooLong => F[Response[F]],
+      traceEnabled: Option[F[Boolean]],
   )(implicit F: Async[F]): Stream[F, Nothing] = {
     val server: Stream[F, Socket[F]] =
       Stream
@@ -100,12 +100,13 @@ private[server] object ServerHelpers extends ServerHelpersPlatform {
       maxHeaderSize: Int,
       requestHeaderReceiveTimeout: Duration,
       idleTimeout: Duration,
-      logger: Logger[F],
+      logger: LoggerKernel[F],
       createRequestVault = true,
       webSocketKey,
       enableHttp2 = enableHttp2,
       requestLineParseErrorHandler,
       maxHeaderSizeErrorHandler,
+      traceEnabled,
     )
   }
 
@@ -127,11 +128,12 @@ private[server] object ServerHelpers extends ServerHelpersPlatform {
       maxHeaderSize: Int,
       requestHeaderReceiveTimeout: Duration,
       idleTimeout: Duration,
-      logger: Logger[F],
+      logger: LoggerKernel[F],
       webSocketKey: Key[WebSocketContext[F]],
       enableHttp2: Boolean,
       requestLineParseErrorHandler: Throwable => F[Response[F]],
       maxHeaderSizeErrorHandler: EmberException.MessageTooLong => F[Response[F]],
+      traceEnabled: Option[F[Boolean]],
   ): Stream[F, Nothing] = {
     val server =
       // Our interface has an issue
@@ -159,12 +161,13 @@ private[server] object ServerHelpers extends ServerHelpersPlatform {
       maxHeaderSize: Int,
       requestHeaderReceiveTimeout: Duration,
       idleTimeout: Duration,
-      logger: Logger[F],
+      logger: LoggerKernel[F],
       createRequestVault = false,
       webSocketKey,
       enableHttp2 = enableHttp2,
       requestLineParseErrorHandler,
       maxHeaderSizeErrorHandler,
+      traceEnabled,
     )
   }
 
@@ -186,21 +189,26 @@ private[server] object ServerHelpers extends ServerHelpersPlatform {
       maxHeaderSize: Int,
       requestHeaderReceiveTimeout: Duration,
       idleTimeout: Duration,
-      logger: Logger[F],
+      logger: LoggerKernel[F],
       createRequestVault: Boolean,
       webSocketKey: Key[WebSocketContext[F]],
       enableHttp2: Boolean,
       requestLineParseErrorHandler: Throwable => F[Response[F]],
       maxHeaderSizeErrorHandler: EmberException.MessageTooLong => F[Response[F]],
+      traceEnabled: Option[F[Boolean]],
   ): Stream[F, Nothing] = {
     val streams: Stream[F, Stream[F, Nothing]] = server
       .interruptWhen(shutdown.signal.attempt)
       .map { connect =>
         val handler: Stream[F, Nothing] = shutdown.trackConnection >>
           Stream
-            .resource(upgradeSocket(connect, tlsInfoOpt, logger, enableHttp2))
+            .resource(upgradeSocket(connect, tlsInfoOpt, logger, enableHttp2, traceEnabled))
             .handleErrorWith(err =>
-              Stream.exec(logger.warn(err)("Failed to upgrade socket to TLS"))
+              Stream.exec(
+                logger.logWarn(
+                  _.withThrowable(err).withMessage("Failed to upgrade socket to TLS")
+                )
+              )
             )
             .flatMap {
               case (socket, Some("h2")) =>
@@ -299,7 +307,10 @@ private[server] object ServerHelpers extends ServerHelpersPlatform {
         def fullConnectionErrorHandler(t: Throwable): F[Unit] =
           connectionErrorHandler.applyOrElse(
             t,
-            (t: Throwable) => logger.error(t)("Request handler failed with exception"),
+            (t: Throwable) =>
+              logger.logError(
+                _.withThrowable(t).withMessage("Request handler failed with exception")
+              ),
           )
         handler.handleErrorWith { t =>
           Stream.eval(fullConnectionErrorHandler(t)).drain
@@ -325,8 +336,9 @@ private[server] object ServerHelpers extends ServerHelpersPlatform {
   private[internal] def upgradeSocket[F[_]](
       socketInit: Socket[F],
       tlsInfoOpt: Option[(TLSContext[F], TLSParameters)],
-      logger: Logger[F],
+      logger: LoggerKernel[F],
       enableHttp2: Boolean,
+      traceEnabled: Option[F[Boolean]],
   )(implicit F: MonadError[F, Throwable]): Resource[F, (Socket[F], Option[String])] =
     tlsInfoOpt.fold((socketInit, Option.empty[String]).pure[Resource[F, *]]) {
       case (context, params) =>
@@ -338,10 +350,13 @@ private[server] object ServerHelpers extends ServerHelpersPlatform {
 
         Resource
           .eval {
-            logger match {
-              case l: SelfAwareLogger[F] =>
-                l.isTraceEnabled.ifF(TLSLogger.Enabled(s => logger.trace(s)), TLSLogger.Disabled)
-              case _ => TLSLogger.Enabled(s => logger.trace(s)).pure[F]
+            traceEnabled match {
+              case Some(traceEnabledF) =>
+                traceEnabledF.ifF(
+                  TLSLogger.Enabled(s => logger.logTrace(_.withMessage(s))),
+                  TLSLogger.Disabled,
+                )
+              case None => TLSLogger.Enabled(s => logger.logTrace(_.withMessage(s))).pure[F]
             }
           }
           .flatMap { tlsLogger =>
@@ -421,7 +436,7 @@ private[server] object ServerHelpers extends ServerHelpersPlatform {
 
   private[internal] def runConnection[F[_]: Async](
       socket: Socket[F],
-      logger: Logger[F],
+      logger: LoggerKernel[F],
       idleTimeout: Duration,
       receiveBufferSize: Int,
       maxHeaderSize: Int,

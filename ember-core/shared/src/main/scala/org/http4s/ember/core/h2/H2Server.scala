@@ -29,7 +29,7 @@ import fs2.io.net._
 import fs2.io.net.unixsocket.UnixSocketAddress
 import org.http4s._
 import org.typelevel.ci._
-import org.typelevel.log4cats.Logger
+import logger.LoggerKernel
 import scodec.bits._
 
 import scala.concurrent.duration._
@@ -171,7 +171,7 @@ private[ember] object H2Server {
       socket: Socket[F],
       httpApp: HttpApp[F],
       localSettings: H2Frame.Settings.ConnectionSettings,
-      logger: Logger[F],
+      logger: LoggerKernel[F],
       // Only Used for http1 upgrade where remote settings are provided prior to escalation
       initialRemoteSettings: H2Frame.Settings.ConnectionSettings = defaultSettings,
       initialRequest: Option[Request[fs2.Pure]] = None,
@@ -300,11 +300,19 @@ private[ember] object H2Server {
         .fromQueueUnterminated(h2.createdStreams)
         .parEvalMapUnordered(localSettings.maxConcurrentStreams.maxConcurrency)(i =>
           processCreatedStream(h2, i)
-            .handleErrorWith(e => logger.error(e)(s"Error while processing stream"))
+            .handleErrorWith(e =>
+              logger.logError(
+                _.withThrowable(e).withMessage(s"Error while processing stream")
+              )
+            )
         )
         .compile
         .drain
-        .onError { case e => logger.error(e)(s"Server Connection Processing Halted") }
+        .onError { case e =>
+          logger.logError(
+            _.withThrowable(e).withMessage(s"Server Connection Processing Halted")
+          )
+        }
 
     val settingsFrame = H2Frame.Settings.ConnectionSettings.toSettings(localSettings)
 

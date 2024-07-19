@@ -27,7 +27,7 @@ import fs2.concurrent.Channel
 import fs2.io.net.Socket
 import fs2.io.net.SocketException
 import fs2.io.net.unixsocket.UnixSocketAddress
-import org.typelevel.log4cats.Logger
+import _root_.logger.LoggerKernel
 import scodec.bits._
 
 import H2Frame.Settings.SettingsInitialWindowSize
@@ -48,7 +48,7 @@ private[h2] class H2Connection[F[_]](
     val settingsAck: Deferred[F, Either[Throwable, H2Frame.Settings.ConnectionSettings]],
     acc: ByteVector, // Any Bytes Already Read
     socket: Socket[F],
-    logger: Logger[F],
+    logger: LoggerKernel[F],
 )(implicit F: Temporal[F]) {
 
   private[this] def addrStr = address.fold(_.toString, _.toString)
@@ -163,7 +163,7 @@ private[h2] class H2Connection[F[_]](
         state.update(s => s.copy(writeWindow = s.writeWindow - fullDataSize)) >>
           socket.isOpen.ifM(
             socket.write(Chunk.byteVector(bv)) >>
-              chunk.traverse_(frame => logger.debug(s"$addrStr Write - $frame")),
+              chunk.traverse_(frame => logger.logDebug(_.withMessage(s"$addrStr Write - $frame"))),
             new SocketException("Socket closed when attempting to write").raiseError,
           )
       } else {
@@ -177,7 +177,7 @@ private[h2] class H2Connection[F[_]](
         }
         socket.isOpen.ifM(
           socket.write(Chunk.byteVector(bv)) >>
-            nonData.traverse_(frame => logger.debug(s"$addrStr Write - $frame")),
+            nonData.traverse_(frame => logger.logDebug(_.withMessage(s"$addrStr Write - $frame"))),
           new SocketException("Socket closed when attempting to write").raiseError,
         ) >>
           s.writeBlock.get.rethrow >>
@@ -196,7 +196,11 @@ private[h2] class H2Connection[F[_]](
     Stream
       .fromQueueUnterminated[F, Chunk[H2Frame]](outgoing, Int.MaxValue)
       .foreach(writeChunk)
-      .handleErrorWith(ex => Stream.exec(logger.debug(ex)("writeLoop terminated")))
+      .handleErrorWith(ex =>
+        Stream.exec(
+          logger.logDebug(_.withThrowable(ex).withMessage("writeLoop terminated"))
+        )
+      )
 
   // TODO Split Frames between Data and Others Hold Data If we are at cap
   //  Currently will backpressure at the data frame till its cleared
@@ -211,7 +215,7 @@ private[h2] class H2Connection[F[_]](
         readFromSocket.flatMap {
           case Some(chunk) => readNextFrame(chunk.toByteVector)
           case None =>
-            logger.debug(s"$connectionTerminated with empty").as(None)
+            logger.logDebug(_.withMessage(s"$connectionTerminated with empty")).as(None)
         }
       } else
         H2Frame.RawFrame.fromByteVector(acc) match {
@@ -219,13 +223,14 @@ private[h2] class H2Connection[F[_]](
             H2Frame.fromRaw(raw) match {
               case Right(frame) => F.pure(Some((frame, leftover)))
               case Left(e) =>
-                logger.warn(s"$connectionTerminated invalid Raw to Frame $e") >>
+                logger.logWarn(_.withMessage(s"$connectionTerminated invalid Raw to Frame $e")) >>
                   goAway(e) >> F.pure(None)
             }
           case None =>
             readFromSocket.flatMap {
               case Some(chunk) => readNextFrame(acc ++ chunk.toByteVector)
-              case None => logger.debug(s"$connectionTerminated with $acc").as(None)
+              case None =>
+                logger.logDebug(_.withMessage(s"$connectionTerminated with $acc")).as(None)
             }
         }
 
@@ -251,7 +256,7 @@ private[h2] class H2Connection[F[_]](
                 )
             }
         } else {
-          logger.warn("Invalid Continuation - Protocol Error - Issuing GoAway") >>
+          logger.logWarn(_.withMessage("Invalid Continuation - Protocol Error - Issuing GoAway")) >>
             goAway(H2Error.ProtocolError)
         }
       case (
@@ -274,7 +279,7 @@ private[h2] class H2Connection[F[_]](
                 )
             }
         } else {
-          logger.warn("Invalid Continuation - Protocol Error - Issuing GoAway") >>
+          logger.logWarn(_.withMessage("Invalid Continuation - Protocol Error - Issuing GoAway")) >>
             goAway(H2Error.ProtocolError)
         }
       case (
@@ -284,7 +289,7 @@ private[h2] class H2Connection[F[_]](
         if (h.identifier == id) {
           state.update(s => s.copy(pushPromiseInProgress = (h, cs ::: c :: Nil).some))
         } else {
-          logger.warn("Invalid Continuation - Protocol Error - Issuing GoAway") >>
+          logger.logWarn(_.withMessage("Invalid Continuation - Protocol Error - Issuing GoAway")) >>
             goAway(H2Error.ProtocolError)
         }
 
@@ -295,26 +300,32 @@ private[h2] class H2Connection[F[_]](
         if (h.identifier == id) {
           state.update(s => s.copy(headersInProgress = (h, cs ::: c :: Nil).some))
         } else {
-          logger.warn("Invalid Continuation - Protocol Error - Issuing GoAway") >>
+          logger.logWarn(_.withMessage("Invalid Continuation - Protocol Error - Issuing GoAway")) >>
             goAway(H2Error.ProtocolError)
         }
       case (f, H2Connection.State(_, _, _, _, _, _, _, Some(_), None)) =>
         // Only Continuation Frames Are Valid While there is a value
-        logger.warn(
-          s"Continuation for headers in process, retrieved unexpected frame $f -  Protocol Error - Issuing GoAway"
+        logger.logWarn(
+          _.withMessage(
+            s"Continuation for headers in process, retrieved unexpected frame $f -  Protocol Error - Issuing GoAway"
+          )
         ) >>
           goAway(H2Error.ProtocolError)
       case (f, H2Connection.State(_, _, _, _, _, _, _, None, Some(_))) =>
         // Only Continuation Frames Are Valid While there is a value
-        logger.warn(
-          s"Continuation for push promise in process, retrieved unexpected frame $f -  Protocol Error - Issuing GoAway"
+        logger.logWarn(
+          _.withMessage(
+            s"Continuation for push promise in process, retrieved unexpected frame $f -  Protocol Error - Issuing GoAway"
+          )
         ) >>
           goAway(H2Error.ProtocolError)
 
       case (h @ H2Frame.Headers(i, sd, _, true, headerBlock, _), s) =>
         val size = headerBlock.size.toInt
         if (size > s.remoteSettings.maxFrameSize.frameSize) {
-          logger.warn("Header Size too large for frame size - FrameSizeError - Issuing GoAway") >>
+          logger.logWarn(
+            _.withMessage("Header Size too large for frame size - FrameSizeError - Issuing GoAway")
+          ) >>
             goAway(H2Error.FrameSizeError)
         } else if (sd.exists(s => s.dependency == i)) {
           goAway(H2Error.ProtocolError)
@@ -328,8 +339,10 @@ private[h2] class H2Connection[F[_]](
                 case H2Connection.ConnectionType.Client => i % 2 == 0
               }
               if (!isValidToCreate || i <= s.remoteHighestStream) {
-                logger.warn(
-                  s"Not Valid Stream to Create $i - $isValidToCreate, ${s.highestStream} - Protocol Error - Issuing GoAway"
+                logger.logWarn(
+                  _.withMessage(
+                    s"Not Valid Stream to Create $i - $isValidToCreate, ${s.highestStream} - Protocol Error - Issuing GoAway"
+                  )
                 ) >>
                   goAway(H2Error.ProtocolError)
               } else {
@@ -354,12 +367,16 @@ private[h2] class H2Connection[F[_]](
       case (h @ H2Frame.PushPromise(_, true, i, headerBlock, _), s) =>
         val size = headerBlock.size.toInt
         if (connectionType == H2Connection.ConnectionType.Server) {
-          logger.warn(
-            "Encountered Push Promise Frame a a Server - Protocol Error - Issuing GoAway"
+          logger.logWarn(
+            _.withMessage(
+              "Encountered Push Promise Frame a a Server - Protocol Error - Issuing GoAway"
+            )
           ) >>
             goAway(H2Error.ProtocolError)
         } else if (size > s.remoteSettings.maxFrameSize.frameSize) {
-          logger.warn("Header Size too large for frame size - FrameSizeError - Issuing GoAway") >>
+          logger.logWarn(
+            _.withMessage("Header Size too large for frame size - FrameSizeError - Issuing GoAway")
+          ) >>
             goAway(H2Error.FrameSizeError)
         } else {
           mapRef.get.map(_.get(i)).flatMap {
@@ -368,8 +385,10 @@ private[h2] class H2Connection[F[_]](
             case None =>
               val isValidToCreate = i % 2 == 0
               if (!isValidToCreate || i <= s.remoteHighestStream) {
-                logger.warn(
-                  s"Not Valid Stream to Create $i - $isValidToCreate, ${s.remoteHighestStream} - Protocol Error - Issuing GoAway"
+                logger.logWarn(
+                  _.withMessage(
+                    s"Not Valid Stream to Create $i - $isValidToCreate, ${s.remoteHighestStream} - Protocol Error - Issuing GoAway"
+                  )
                 )
                 goAway(H2Error.ProtocolError)
               } else {
@@ -422,7 +441,9 @@ private[h2] class H2Connection[F[_]](
         } yield ()
       case (H2Frame.Settings(0, true, _), _) => Applicative[F].unit
       case (H2Frame.Settings(_, _, _), _) =>
-        logger.warn("Received Settings Not Oriented at Identifier 0 - Issuing goAway") >>
+        logger.logWarn(
+          _.withMessage("Received Settings Not Oriented at Identifier 0 - Issuing goAway")
+        ) >>
           goAway(H2Error.ProtocolError)
       case (g @ H2Frame.GoAway(0, _, _, _), _) =>
         mapRef.get.flatMap { m =>
@@ -437,7 +458,9 @@ private[h2] class H2Connection[F[_]](
         goAway(H2Error.ProtocolError)
 
       case (H2Frame.WindowUpdate(_, 0), _) =>
-        logger.warn("Encountered 0 Sized Window Update - Procol Error - Issuing GoAway") >>
+        logger.logWarn(
+          _.withMessage("Encountered 0 Sized Window Update - Procol Error - Issuing GoAway")
+        ) >>
           goAway(H2Error.ProtocolError)
       case (w @ H2Frame.WindowUpdate(i, size), _) =>
         i match {
@@ -465,7 +488,9 @@ private[h2] class H2Connection[F[_]](
               case Some(s) =>
                 s.receiveWindowUpdate(w)
               case None =>
-                logger.warn(s"Received WindowUpdate for Closed or Idle Stream - $w, $i") >>
+                logger.logWarn(
+                  _.withMessage(s"Received WindowUpdate for Closed or Idle Stream - $w, $i")
+                ) >>
                   goAway(H2Error.ProtocolError)
             }
         }
@@ -473,8 +498,10 @@ private[h2] class H2Connection[F[_]](
       case (d @ H2Frame.Data(i, data, _, _), _) =>
         val size = data.size.toInt
         if (size > localSettings.maxFrameSize.frameSize) {
-          logger.warn(
-            "Receive Data Size Larger than Allowed Frame Size - Frame Size Error - Issuing GoAway"
+          logger.logWarn(
+            _.withMessage(
+              "Receive Data Size Larger than Allowed Frame Size - Frame Size Error - Issuing GoAway"
+            )
           ) >>
             goAway(H2Error.FrameSizeError)
         } else {
@@ -505,8 +532,10 @@ private[h2] class H2Connection[F[_]](
                 _ <- s.receiveData(d)
               } yield ()
             case None =>
-              logger.warn(
-                s"Received Data Frame for Idle or Closed Stream $i - Protocol Error - Issuing GoAway"
+              logger.logWarn(
+                _.withMessage(
+                  s"Received Data Frame for Idle or Closed Stream $i - Protocol Error - Issuing GoAway"
+                )
               ) >>
                 goAway(H2Error.ProtocolError)
           }
@@ -517,8 +546,10 @@ private[h2] class H2Connection[F[_]](
           case Some(s) =>
             s.receiveRstStream(rst)
           case None =>
-            logger.warn(
-              s"Received RstStream for Idle or Closed Stream $i - Protocol Error - Issuing GoAway"
+            logger.logWarn(
+              _.withMessage(
+                s"Received RstStream for Idle or Closed Stream $i - Protocol Error - Issuing GoAway"
+              )
             ) >>
               goAway(H2Error.ProtocolError)
         }
@@ -531,7 +562,7 @@ private[h2] class H2Connection[F[_]](
     def readLoopAux(acc: ByteVector): F[Unit] =
       readNextFrame(acc).flatMap {
         case Some((frame, nacc)) =>
-          logger.debug(s"$addrStr Read - $frame") >>
+          logger.logWarn(_.withMessage(s"$addrStr Read - $frame")) >>
             state.get.flatMap(processFrame(frame, _)) >>
             readLoopAux(nacc)
         case None => F.unit
@@ -539,10 +570,10 @@ private[h2] class H2Connection[F[_]](
 
     F.guaranteeCase(readLoopAux(acc)) {
       case Outcome.Errored(H2Connection.KillWithoutMessage()) =>
-        logger.debug(s"ReadLoop has received that is should kill") >>
+        logger.logDebug(_.withMessage(s"ReadLoop has received that is should kill")) >>
           state.update(s => s.copy(closed = true))
       case Outcome.Errored(e) =>
-        logger.error(e)(s"ReadLoop has errored") >>
+        logger.logError(_.withMessage(s"ReadLoop has errored").withThrowable(e)) >>
           goAway(H2Error.InternalError) >>
           state.update(s => s.copy(closed = true))
 
